@@ -1,0 +1,144 @@
+// This build script makes everything work well
+
+import java.security.MessageDigest
+
+def sampleTests = subprojects.collect { it.name } 
+
+
+def buildDir = file('build')
+def tmpDir = file("$buildDir/tmp")
+tmpDir.mkdirs()
+project.ext.buildDir = buildDir
+project.ext.tmpDir = tmpDir
+project.ext.cheater = false
+
+def stampsFile = file("$buildDir/tests.stamp")
+
+task makeTestStamps(type : MakeTestStamps) {
+
+  inputDirs = sampleTests.collect { file("$it/src/instrumentTest") }
+  inputDirs += file("build.gradle")
+  inputDirs += file("settings.gradle")
+  inputDirs += sampleTests.collect { file("$it/build.gradle") }
+  inputDirs += sampleTests.collect { file("$it/settings.gradle") }
+  resultFile = stampsFile
+
+}
+
+void download(def what, File where) {
+  def out = new BufferedOutputStream(new FileOutputStream(where))
+  out << new URL("http://stanfy-engine.appspot.com/tools/$what").openStream()
+  out.close()
+}
+
+task checkTestStamp(dependsOn : 'makeTestStamps') << {
+  def current = tasks['makeTestStamps'].resultFile.text
+  project.ext.cheater = current
+  println "Cheater: $project.cheater"
+}
+
+def scoreTable = [
+  "com.stanfy.hotcode.part0.test.MainActivityTest#testContentSet" : 10,
+  "com.stanfy.hotcode.part1.test.MainActivityTest#testPreconditions" : 0,
+  "com.stanfy.hotcode.part1.test.MainActivityTest#testBgColorChange" : 10,
+  "com.stanfy.hotcode.part1.test.MainActivityTest#testBgColorRestore" : 10,
+  "com.stanfy.hotcode.part1.test.MainActivityTest#testIntentFilter" : 10,
+  "com.stanfy.hotcode.part2.test.MainActivityTest#testPreConditions" : 2,
+  "com.stanfy.hotcode.part2.test.MainActivityTest#testColorArrayNotModified" : 3,
+  "com.stanfy.hotcode.part2.test.MainActivityTest#testColorTiltesArrayNotModified" : 3,
+  "com.stanfy.hotcode.part2.test.MainActivityTest#testFragmentsCreationInPortraitMode" : 3,
+  "com.stanfy.hotcode.part2.test.MainActivityTest#testFragmentsCreationInLandscapeMode" : 3,
+  "com.stanfy.hotcode.part2.test.MainActivityTest#testColorChangedCorrectlyInLandscapeMode" : 5,
+  "com.stanfy.hotcode.part2.test.MainActivityTest#testColorChangedCorrectlyInPortraitMode" : 5,
+  "com.stanfy.hotcode.part2.test.MainActivityTest#testColorRestore" : 6,
+  "com.stanfy.hotcode.part3.service.test.HotServiceTest#testDumb" : 1,
+  "com.stanfy.hotcode.part3.test.HotTest#testIntent" : 4,
+  "com.stanfy.hotcode.part3.test.HotTest#testNaive" : 10,
+  "com.stanfy.hotcode.part3.test.HotTest#testServer" : 15
+]
+
+def subChecks = subprojects.collect { ":$it.name:check" }
+task checkAndRate(dependsOn : subChecks + 'checkTestStamp') << {
+  // get score
+  int score = 0
+  sampleTests.each {
+    def reportsDir = new File("$it/build/instrumentTest-results/connected")
+    if (!reportsDir.exists()) { return }
+    reportsDir.eachFile {
+      if (!it.name.endsWith(".xml")) { return }
+      def testsInfo = new XmlParser().parse(it)
+      int projectScore = testsInfo.testcase.inject(0) { int acc, def testcase ->
+        if (acc == -1) { return -1; }
+        boolean success = testcase.children().size() == 0;
+        String key = testcase.'@classname' + '#' + testcase.'@name'
+        if (scoreTable.containsKey(key)) {
+          return success ? acc + scoreTable[key] : acc
+        }
+        return success ? acc : -1;
+      }
+      if (projectScore != -1) {
+        score += projectScore
+      }
+    }
+  }
+
+  println "Score: $score"
+
+  // get time
+  def gitLog = "git --no-pager log -1 --format=%at".execute()
+  gitLog.waitFor()
+  def time = gitLog.in.text.trim()
+
+  println "Time: $time"
+
+  // get user
+  def user = "${System.env.TRAVIS_PULL_REQUEST}"
+  if (!user) {
+    println "Unknown user!"
+    //return
+  }
+
+  println "User: $user"
+
+  def uploaderFile = file("$tmpDir/uploader")
+  download "upl-386", uploaderFile
+  ant.chmod(file : uploaderFile, perm : "+x")
+  def upl = "$uploaderFile.path -name=$user -rate=$score -time=$time -cheater=$project.cheater".execute()
+  upl.waitFor()
+  println "Res: ${upl.exitValue()}, $upl.in.text, $upl.err.text"
+}
+
+class MakeTestStamps extends DefaultTask {
+
+  List<File> inputDirs
+
+  File resultFile
+
+  private static String getHash(File f) {
+      def messageDigest = MessageDigest.getInstance("SHA1")
+      f.eachByte(1 << 20) { byte[] buf, int bytesRead ->
+        messageDigest.update(buf, 0, bytesRead);
+      }
+      return new BigInteger(1, messageDigest.digest()).toString(16).padLeft(40, '0' )
+  }
+
+  @TaskAction
+  void makeIt() {
+    resultFile.delete()
+    resultFile << inputDirs.inject("") {String stamp, File inF ->
+      if (!inF.exists()) { return stamp }
+      File f = null
+      if (inF.directory) {
+        inF.eachFileRecurse(groovy.io.FileType.FILES) {
+          if (it.name.endsWith("java")) {
+            stamp += MakeTestStamps.getHash(it)
+          }
+        }
+      } else {
+        stamp += MakeTestStamps.getHash(inF)
+      }
+      return stamp
+    }
+  }
+
+}
